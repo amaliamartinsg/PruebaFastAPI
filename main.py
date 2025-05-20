@@ -1,15 +1,17 @@
 import logging
 import re
 from typing import Optional
+from datetime import date
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from sqlalchemy import Column, Integer, String, create_engine, Boolean
+from sqlalchemy import Column, Integer, String, Date, create_engine, Boolean
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
-from fastapi import BackgroundTasks
+from sqlalchemy import ForeignKey
+from fastapi import Query
 
 # --- Logging ---
 logging.basicConfig(
@@ -71,7 +73,18 @@ class AnimalDB(Base):
     tipo = Column(String)
     adoptado = Column(Boolean, default=False)
 
+
+class AdoptionDB(Base):
+    __tablename__ = "adoptions"
+
+    fecha = Column(Date)
+    # animal_id = Column(Integer, primary_key=True, index=True)
+    animal_id = Column(Integer, ForeignKey("animals.id"), primary_key=True, index=True)
+    # user_id = Column(Integer, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"))
+
 Base.metadata.create_all(bind=engine)
+
 
 # --- Pydantic model ---
 
@@ -107,7 +120,7 @@ class AnimalSchema(BaseModel):
     tipo: str = Field(..., description="Tipo (perro o gato)")
 
     @field_validator("nombre")
-    def lenght_name(cls, value):
+    def lenght_name_1(cls, value):
         if len(value) < 3:
             raise ValueError("El nombre debe tener al menos 3 caracteres")
         return value
@@ -117,6 +130,11 @@ class AnimalSchema(BaseModel):
         if value not in ["perro", "gato"]:
             raise ValueError("El tipo debe ser 'perro' o 'gato'")
         return value
+    
+
+class AdoptionSchema(BaseModel):
+    nombre_animal: str = Field(..., description="Nombre del animal que quiere adoptar")
+    nombre_user: str = Field(..., description="Nombre del usuario que quiere adoptar")
 
 # --- FastAPI setup ---
 app = FastAPI(
@@ -177,9 +195,8 @@ def create_animal(animal: AnimalSchema):
     }
 
 
-@app.get("/disponibles/")
-@app.get("/disponibles/{tipo}")
-def get_available_animals(tipo: Optional[str] = None):
+@app.get("/disponibles")
+def get_available_animals(tipo: str = Query(None, description="Filtrar por tipo de animal ('perro' o 'gato')")):
     db = SessionLocal()
     if tipo:
         animals = db.query(AnimalDB).filter(AnimalDB.adoptado == False, AnimalDB.tipo == tipo).all()
@@ -193,3 +210,85 @@ def get_available_animals(tipo: Optional[str] = None):
             {"nombre": animal.nombre, "edad": animal.edad, "tipo": animal.tipo} for animal in animals
         ]
     }
+
+
+@app.post("/adopcion/random/")
+def adopt_animal(user_name: str, tipo: str = Query(None, description="Filtrar por tipo de animal ('perro' o 'gato')")):
+    
+    db = SessionLocal()
+    # si el usuario existe
+    user_adopt = db.query(UserDB).filter(UserDB.nombre == user_name).first()
+    if not user_adopt:
+        db.close()
+        raise HTTPException(status_code=400, detail="El usuario no está registrado")
+    user_id = user_adopt.id
+    if tipo:
+        animal_adopt = db.query(AnimalDB).filter(AnimalDB.adoptado == False, AnimalDB.tipo == tipo).order_by(AnimalDB.edad.desc()).first()
+    else:
+        animal_adopt = db.query(AnimalDB).filter(AnimalDB.adoptado == False).order_by(AnimalDB.edad.desc()).first()
+    if not animal_adopt:
+        db.close()
+        raise HTTPException(status_code=400, detail="No hay animales disponibles para adopción")
+    animal_id = animal_adopt.id
+    animal_name = animal_adopt.nombre
+
+    # registramos la adopción
+    adoption_db = AdoptionDB(fecha=date.today(), animal_id=animal_id, user_id=user_id)
+    db.add(adoption_db)
+
+    #modificamos el animal para que no esté disponible
+    animal_db = db.query(AnimalDB).filter(AnimalDB.id == animal_id).first()
+    animal_db.adoptado = True
+
+    db.commit()
+
+    return {
+        "msg": "Adopción registrada correctamente",
+        "adopcion": {
+            "animal_name": animal_name,
+            "user_name": user_name,
+        }
+    }
+
+
+@app.post("/adopcion/")
+def adopt_animal(user_name: str, animal_name: str):
+    
+    db = SessionLocal()
+    # si el usuario existe
+    user_adopt = db.query(UserDB).filter(UserDB.nombre == user_name).first()
+    if not user_adopt:
+        db.close()
+        raise HTTPException(status_code=400, detail="El usuario no está registrado")
+    user_id = user_adopt.id
+    # si el animal existe
+    animal_adopt = db.query(AnimalDB).filter(AnimalDB.nombre == animal_name).first()
+    if not animal_adopt:
+        db.close()
+        raise HTTPException(status_code=400, detail="El animal no está registrado")
+    animal_id = animal_adopt.id
+    animal_available = db.query(AnimalDB).filter(AnimalDB.id == animal_id, AnimalDB.adoptado == False).first()
+    if not animal_available:
+        db.close()
+        raise HTTPException(status_code=400, detail="El animal no está disponible para adopción")
+    db.close()
+
+    # registramos la adopción
+    adoption_db = AdoptionDB(fecha=date.today(), animal_id=animal_id, user_id=user_id)
+    db.add(adoption_db)
+
+    #modificamos el animal para que no esté disponible
+    animal_db = db.query(AnimalDB).filter(AnimalDB.id == animal_id).first()
+    animal_db.adoptado = True
+
+    db.commit()
+
+    return {
+        "msg": "Adopción registrada correctamente",
+        "adopcion": {
+            "animal_name": animal_name,
+            "user_name": user_name,
+        }
+    }
+
+
